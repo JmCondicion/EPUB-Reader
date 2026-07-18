@@ -7,9 +7,10 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { saveProgress, getProgress, touchBook, addBookmark, getBook } from '../../../db/database';
+import { useTheme } from '../../theme/ThemeContext';
 
 // epub.js loaded from CDN inside the WebView's HTML shell.
-const READER_HTML = (base64Epub, startCfi) => `
+const READER_HTML = (base64Epub, startCfi, darkMode) => `
 <!DOCTYPE html>
 <html>
 <head>
@@ -17,7 +18,7 @@ const READER_HTML = (base64Epub, startCfi) => `
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
   <style>
-    html, body { margin:0; padding:0; height:100%; background:#f5f0e6; }
+    html, body { margin:0; padding:0; height:100%; background:${darkMode ? '#1a1a1a' : '#f5f0e6'}; }
     #viewer { width:100vw; height:100vh; }
   </style>
 </head>
@@ -42,6 +43,11 @@ const READER_HTML = (base64Epub, startCfi) => `
 
     const startCfi = ${startCfi ? `"${startCfi}"` : 'null'};
     rendition.display(startCfi || undefined);
+
+    // Apply initial theme immediately so it matches the app shell instead
+    // of flashing light before the first 'setTheme' message arrives.
+    rendition.themes.override('color', ${darkMode ? "'#ddd'" : "'#111'"});
+    rendition.themes.override('background', ${darkMode ? "'#1a1a1a'" : "'#f5f0e6'"});
 
     rendition.on('relocated', (location) => {
       const percentage = book.locations.length() ? book.locations.percentageFromCfi(location.start.cfi) : 0;
@@ -107,6 +113,9 @@ const READER_HTML = (base64Epub, startCfi) => `
             rendition.themes.override('background', '#f5f0e6');
           }
         }
+        if (msg.type === 'setFontScale') {
+          rendition.themes.fontSize(msg.scale + '%');
+        }
       } catch (e) {}
     });
   </script>
@@ -117,11 +126,12 @@ const READER_HTML = (base64Epub, startCfi) => `
 export default function ReaderScreen() {
   const { bookId } = useLocalSearchParams();
   const router = useRouter();
+  const { colors, darkMode, toggleDarkMode } = useTheme();
   const webviewRef = useRef(null);
   const [html, setHtml] = useState(null);
   const [title, setTitle] = useState('');
-  const [darkMode, setDarkMode] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(false);
+  const [fontScale, setFontScale] = useState(100); // percent, for low-vision accessibility
 
   // ---- Audiobook (text-to-speech) state ----
   const [audiobookMode, setAudiobookMode] = useState(false);
@@ -141,7 +151,7 @@ export default function ReaderScreen() {
         encoding: FileSystem.EncodingType.Base64,
       });
       const progress = await getProgress(bookId);
-      setHtml(READER_HTML(base64, progress ? progress.cfi : null));
+      setHtml(READER_HTML(base64, progress ? progress.cfi : null, darkMode));
       await touchBook(bookId);
     })();
 
@@ -150,7 +160,13 @@ export default function ReaderScreen() {
       Speech.stop();
       deactivateKeepAwake();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
+
+  // Push theme changes into the already-loaded WebView instead of reloading it.
+  useEffect(() => {
+    webviewRef.current?.postMessage(JSON.stringify({ type: 'setTheme', theme: darkMode ? 'dark' : 'light' }));
+  }, [darkMode]);
 
   // Splits chapter text into TTS-friendly chunks (roughly by sentence,
   // capped in length) so playback can be paused/resumed cleanly and long
@@ -249,6 +265,16 @@ export default function ReaderScreen() {
     setRate(next);
   };
 
+  // Steps between 80% and 200% text size — helps low-vision readers without
+  // needing to leave the reader or rely on OS-level zoom.
+  const cycleFontScale = () => {
+    const options = [80, 100, 120, 150, 175, 200];
+    const currentIdx = options.indexOf(fontScale);
+    const next = options[(currentIdx + 1) % options.length];
+    setFontScale(next);
+    webviewRef.current?.postMessage(JSON.stringify({ type: 'setFontScale', scale: next }));
+  };
+
   const handleMessage = async (event) => {
     try {
       const msg = JSON.parse(event.nativeEvent.data);
@@ -276,29 +302,30 @@ export default function ReaderScreen() {
     }
   };
 
-
-  const toggleTheme = () => {
-    const next = !darkMode;
-    setDarkMode(next);
-    webviewRef.current?.postMessage(JSON.stringify({ type: 'setTheme', theme: next ? 'dark' : 'light' }));
-  };
-
   const addBookmarkHere = () => {
     webviewRef.current?.postMessage(JSON.stringify({ type: 'getCfi' }));
   };
 
   if (!html) {
     return (
-      <SafeAreaView style={[styles.container, { backgroundColor: '#1a1a1a' }]} />
+      <SafeAreaView
+        style={[styles.container, { backgroundColor: colors.surface }]}
+        accessible
+        accessibilityRole="progressbar"
+        accessibilityLabel={`Loading ${title || 'book'}`}
+      />
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
       <TouchableOpacity
         style={StyleSheet.absoluteFill}
         activeOpacity={1}
         onPress={() => setControlsVisible((v) => !v)}
+        accessibilityRole="button"
+        accessibilityLabel="Page content"
+        accessibilityHint="Tap to show or hide reading controls. Tap left edge for previous page, right edge for next page."
       >
         <WebView
           ref={webviewRef}
@@ -312,41 +339,105 @@ export default function ReaderScreen() {
       </TouchableOpacity>
 
       {controlsVisible && (
-        <View style={styles.topBar}>
-          <TouchableOpacity onPress={() => router.back()}>
-            <Text style={styles.barButton}>‹ Library</Text>
+        <View style={[styles.topBar, { backgroundColor: colors.bar }]}>
+          <TouchableOpacity
+            onPress={() => router.back()}
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel="Back to Library"
+          >
+            <Text style={[styles.barButton, { color: colors.accent }]}>‹ Library</Text>
           </TouchableOpacity>
-          <Text style={styles.barTitle} numberOfLines={1}>{title}</Text>
+          <Text style={[styles.barTitle, { color: colors.text }]} numberOfLines={1}>{title}</Text>
           <View style={{ flexDirection: 'row', gap: 12 }}>
-            <TouchableOpacity onPress={addBookmarkHere}>
-              <Text style={styles.barButton}>Bookmark</Text>
+            <TouchableOpacity
+              onPress={addBookmarkHere}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel="Add bookmark"
+              accessibilityHint="Saves your current position in this book"
+            >
+              <Text style={[styles.barButton, { color: colors.accent }]}>Bookmark</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={audiobookMode ? stopAudiobook : startAudiobook}>
-              <Text style={styles.barButton}>{audiobookMode ? 'Stop' : 'Listen'}</Text>
+            <TouchableOpacity
+              onPress={cycleFontScale}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel={`Text size, ${fontScale} percent`}
+              accessibilityHint="Cycles through larger and smaller text sizes"
+            >
+              <Text style={[styles.barButton, { color: colors.accent }]}>Aa {fontScale}%</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={toggleTheme}>
-              <Text style={styles.barButton}>{darkMode ? 'Light' : 'Dark'}</Text>
+            <TouchableOpacity
+              onPress={audiobookMode ? stopAudiobook : startAudiobook}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel={audiobookMode ? 'Stop audiobook' : 'Start audiobook, read this book aloud'}
+            >
+              <Text style={[styles.barButton, { color: colors.accent }]}>{audiobookMode ? 'Stop' : 'Listen'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={toggleDarkMode}
+              accessible
+              accessibilityRole="switch"
+              accessibilityState={{ checked: darkMode }}
+              accessibilityLabel="Dark mode"
+              accessibilityHint="Switches between light and dark reading theme"
+            >
+              <Text style={[styles.barButton, { color: colors.accent }]}>{darkMode ? 'Light' : 'Dark'}</Text>
             </TouchableOpacity>
           </View>
         </View>
       )}
 
       {audiobookMode && (
-        <View style={styles.audioBar}>
-          <TouchableOpacity onPress={() => skipChapter(-1)}>
-            <Text style={styles.audioButton}>⏮</Text>
+        <View
+          style={[styles.audioBar, { backgroundColor: colors.bar }]}
+          accessible={false}
+        >
+          <TouchableOpacity
+            onPress={() => skipChapter(-1)}
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel="Previous chapter"
+          >
+            <Text style={[styles.audioButton, { color: colors.text }]}>⏮</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={isSpeaking ? pauseAudiobook : resumeAudiobook} style={styles.playButton}>
+          <TouchableOpacity
+            onPress={isSpeaking ? pauseAudiobook : resumeAudiobook}
+            style={[styles.playButton, { backgroundColor: colors.accent }]}
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel={isSpeaking ? 'Pause' : 'Play'}
+            accessibilityState={{ selected: isSpeaking }}
+          >
             <Text style={styles.playButtonText}>{isSpeaking ? '⏸' : '▶'}</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => skipChapter(1)}>
-            <Text style={styles.audioButton}>⏭</Text>
+          <TouchableOpacity
+            onPress={() => skipChapter(1)}
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel="Next chapter"
+          >
+            <Text style={[styles.audioButton, { color: colors.text }]}>⏭</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={cycleRate} style={styles.rateButton}>
-            <Text style={styles.rateButtonText}>{rate}x</Text>
+          <TouchableOpacity
+            onPress={cycleRate}
+            style={[styles.rateButton, { borderColor: colors.accent }]}
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel={`Playback speed, ${rate} times`}
+            accessibilityHint="Cycles through playback speeds from 0.75 to 2 times"
+          >
+            <Text style={[styles.rateButtonText, { color: colors.accent }]}>{rate}x</Text>
           </TouchableOpacity>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1 }}>
-            <Text style={styles.chapterLabel} numberOfLines={1}>
+            <Text
+              style={[styles.chapterLabel, { color: colors.subtext }]}
+              numberOfLines={1}
+              accessible
+              accessibilityLabel={`Now reading: ${chapters[chapterIndex]?.label || `Chapter ${chapterIndex + 1}`}`}
+            >
               {chapters[chapterIndex]?.label || `Chapter ${chapterIndex + 1}`}
             </Text>
           </ScrollView>
@@ -357,26 +448,26 @@ export default function ReaderScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f5f0e6' },
+  container: { flex: 1 },
   topBar: {
     position: 'absolute', top: 0, left: 0, right: 0,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: 'rgba(20,20,20,0.85)', paddingHorizontal: 16, paddingVertical: 12,
+    paddingHorizontal: 16, paddingVertical: 12,
   },
-  barTitle: { color: '#fff', fontWeight: '600', flex: 1, marginHorizontal: 8, textAlign: 'center' },
-  barButton: { color: '#4f9cff', fontWeight: '600' },
+  barTitle: { fontWeight: '600', flex: 1, marginHorizontal: 8, textAlign: 'center' },
+  barButton: { fontWeight: '600' },
   audioBar: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     flexDirection: 'row', alignItems: 'center', gap: 14,
-    backgroundColor: 'rgba(20,20,20,0.92)', paddingHorizontal: 16, paddingVertical: 12,
+    paddingHorizontal: 16, paddingVertical: 12,
   },
-  audioButton: { color: '#fff', fontSize: 20 },
+  audioButton: { fontSize: 20 },
   playButton: {
-    width: 40, height: 40, borderRadius: 20, backgroundColor: '#4f9cff',
+    width: 40, height: 40, borderRadius: 20,
     alignItems: 'center', justifyContent: 'center',
   },
   playButtonText: { color: '#fff', fontSize: 16 },
-  rateButton: { borderWidth: 1, borderColor: '#4f9cff', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4 },
-  rateButtonText: { color: '#4f9cff', fontWeight: '600', fontSize: 12 },
-  chapterLabel: { color: '#ccc', fontSize: 12 },
+  rateButton: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4 },
+  rateButtonText: { fontWeight: '600', fontSize: 12 },
+  chapterLabel: { fontSize: 12 },
 });
