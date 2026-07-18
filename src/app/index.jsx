@@ -8,7 +8,7 @@ import * as DocumentPicker from 'expo-document-picker';
 
 import { addBook, getAllBooks, deleteBook } from '../../db/database';
 import { extractEpubMetadata, importEpubFile } from '../../utils/epubUtils';
-import { useTheme } from '../theme/ThemeContext';
+import { useTheme } from '../../Context/ThemeContext';
 
 export default function LibraryScreen() {
   const router = useRouter();
