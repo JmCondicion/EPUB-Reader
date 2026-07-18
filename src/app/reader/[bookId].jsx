@@ -7,7 +7,7 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { saveProgress, getProgress, touchBook, addBookmark, getBook } from '../../../db/database';
-import { useTheme } from '../../theme/ThemeContext';
+import { useTheme } from '../../../Context/ThemeContext';
 
 // epub.js loaded from CDN inside the WebView's HTML shell.
 const READER_HTML = (base64Epub, startCfi, darkMode) => `
@@ -141,6 +141,9 @@ export default function ReaderScreen() {
   const [rate, setRate] = useState(1.0); // 0.75 / 1.0 / 1.25 / 1.5
   const speechChunksRef = useRef([]); // remaining sentence chunks for current chapter
   const shouldContinueRef = useRef(false);
+  const chapterIndexRef = useRef(0);
+  const chaptersRef = useRef([]);
+  const rateRef = useRef(1.0);
 
   useEffect(() => {
     (async () => {
@@ -168,6 +171,9 @@ export default function ReaderScreen() {
     webviewRef.current?.postMessage(JSON.stringify({ type: 'setTheme', theme: darkMode ? 'dark' : 'light' }));
   }, [darkMode]);
 
+  // Sync rate to ref so speech callbacks always read the latest value.
+  useEffect(() => { rateRef.current = rate; }, [rate]);
+
   // Splits chapter text into TTS-friendly chunks (roughly by sentence,
   // capped in length) so playback can be paused/resumed cleanly and long
   // chapters don't exceed platform speech-string limits.
@@ -192,37 +198,38 @@ export default function ReaderScreen() {
     const next = speechChunksRef.current.shift();
     if (!next) {
       // Chapter finished — advance to the next one automatically.
-      goToChapter(chapterIndex + 1, true);
+      goToChapter(chapterIndexRef.current + 1, true);
       return;
     }
     Speech.speak(next, {
-      rate,
+      rate: rateRef.current,
       onDone: () => speakNextChunk(),
       onStopped: () => {},
       onError: () => speakNextChunk(),
     });
-  }, [rate, chapterIndex]);
+  }, []);
 
   const goToChapter = useCallback((index, autoStart) => {
-    if (index < 0 || index >= chapters.length) {
+    if (index < 0 || index >= chaptersRef.current.length) {
       shouldContinueRef.current = false;
       setIsSpeaking(false);
       return;
     }
     setChapterIndex(index);
-    const chapter = chapters[index];
+    chapterIndexRef.current = index;
+    const chapter = chaptersRef.current[index];
     webviewRef.current?.postMessage(JSON.stringify({ type: 'displayHref', href: chapter.href }));
     webviewRef.current?.postMessage(JSON.stringify({ type: 'getChapterText', href: chapter.href }));
     if (autoStart) shouldContinueRef.current = true;
-  }, [chapters]);
+  }, []);
 
   const startAudiobook = () => {
-    if (chapters.length === 0) return;
+    if (chaptersRef.current.length === 0) return;
     setAudiobookMode(true);
     shouldContinueRef.current = true;
     setIsSpeaking(true);
     activateKeepAwakeAsync();
-    goToChapter(chapterIndex, true);
+    goToChapter(chapterIndexRef.current, true);
   };
 
   const pauseAudiobook = () => {
@@ -239,7 +246,7 @@ export default function ReaderScreen() {
     if (speechChunksRef.current.length > 0) {
       speakNextChunk();
     } else {
-      goToChapter(chapterIndex, true);
+      goToChapter(chapterIndexRef.current, true);
     }
   };
 
@@ -256,7 +263,7 @@ export default function ReaderScreen() {
     Speech.stop();
     speechChunksRef.current = [];
     shouldContinueRef.current = true;
-    goToChapter(chapterIndex + dir, true);
+    goToChapter(chapterIndexRef.current + dir, true);
   };
 
   const cycleRate = () => {
@@ -286,13 +293,14 @@ export default function ReaderScreen() {
       }
       if (msg.type === 'chapters') {
         setChapters(msg.chapters || []);
+        chaptersRef.current = msg.chapters || [];
       }
       if (msg.type === 'chapterText') {
         const chunks = chunkText(msg.text || '');
         speechChunksRef.current = chunks;
         if (chunks.length === 0) {
           // Empty chapter (e.g. image-only page) — skip straight to the next one.
-          goToChapter(chapterIndex + 1, true);
+          goToChapter(chapterIndexRef.current + 1, true);
         } else if (shouldContinueRef.current) {
           speakNextChunk();
         }

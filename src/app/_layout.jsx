@@ -4,7 +4,7 @@ import { Stack } from 'expo-router';
 import { View, ActivityIndicator, StyleSheet, Text } from 'react-native';
 
 import { initDatabase } from '../../db/database';
-import { ThemeProvider, useTheme } from '../theme/ThemeContext';
+import { ThemeProvider, useTheme } from '../../Context/ThemeContext';
 
 function RootLayoutInner() {
   const [ready, setReady] = useState(false);
